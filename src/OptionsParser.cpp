@@ -24,12 +24,11 @@
 //===----------------------------------------------------------------------===//
 
 #include "OptionsParser.h"
-#include "clang/Tooling/CommonOptionsParser.h"
 #include "clang/Tooling/Tooling.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/CommandLine.h"
-#include "llvm/Support/Error.h"
+#include "clang/Tooling/CommonOptionsParser.h"
 #include "llvm/Support/Path.h"
 
 using namespace clang::tooling;
@@ -57,33 +56,23 @@ const char *const OptionsParser::HelpMessage =
     "\tautomatically removed, but the rest of a relative path must be a\n"
     "\tsuffix of a path in the compile command database.\n"
     "\n";
-static void replaceAll(std::string &str, const std::string &from,
-                       const std::string &to) {
-  if (from.empty())
-    return;
-  size_t start_pos = 0;
-  while ((start_pos = str.find(from, start_pos)) != std::string::npos) {
-    str.replace(start_pos, from.length(), to);
-    start_pos += to.length(); // In case 'to' contains 'from', like replacing
-                              // 'x' with 'yx'
-  }
+void replaceAll(std::string& str, const std::string& from, const std::string& to) {
+    if(from.empty())
+        return;
+    size_t start_pos = 0;
+    while((start_pos = str.find(from, start_pos)) != std::string::npos) {
+        str.replace(start_pos, from.length(), to);
+        start_pos += to.length(); // In case 'to' contains 'from', like replacing 'x' with 'yx'
+    }
 }
-llvm::Error OptionsParser::init(int &argc, const char **argv,
-                                llvm::cl::NumOccurrencesFlag OccurrencesFlag,
-                                cl::OptionCategory &Category,
-                                const char *Overview) {
+llvm::Error OptionsParser::init(
+    int &argc, const char **argv, cl::OptionCategory &Category, const char *Overview) {
 
-  static cl::opt<std::string> BuildPath("p", cl::desc("Build path"),
-                                        cl::Optional, cl::cat(Category),
+  static cl::opt<std::string> BuildPath(cl::Positional, cl::desc("Build path"),
+                                        cl::Required, cl::cat(Category),
                                         cl::sub(*cl::AllSubCommands));
 
-  static cl::list<std::string> Filter(
-      "folder", cl::desc("scan files in folders only"), cl::cat(Category),
-      cl::sub(*cl::AllSubCommands), cl::ZeroOrMore);
-
-  static cl::list<std::string> SourcePaths(
-      cl::Positional, cl::desc("<source0> [... <sourceN>]"), OccurrencesFlag,
-      cl::cat(Category), cl::sub(*cl::AllSubCommands));
+  static cl::list<std::string> Filter("folder", cl::desc("scan files in folders only"), cl::cat(Category), cl::sub(*cl::AllSubCommands), cl::ZeroOrMore);
 
   static cl::list<std::string> ArgsAfter(
       "extra-arg",
@@ -100,26 +89,8 @@ llvm::Error OptionsParser::init(int &argc, const char **argv,
   cl::HideUnrelatedOptions(Category);
 
   std::string ErrorMessage;
-  const char *const *DoubleDash = std::find(argv, argv + argc, StringRef("--"));
-  if (DoubleDash != argv + argc)
-  {
-    if(DoubleDash[1][0] == '@')
-    {
-      llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> File =
-      llvm::MemoryBuffer::getFile(DoubleDash[1] + 1);
-      if (std::error_code Result = File.getError()) {
-        ErrorMessage = "Error while opening fixed database: " + Result.message();
-        return llvm::make_error<llvm::StringError>(ErrorMessage,
-                                                  llvm::inconvertibleErrorCode());
-      }
-      Compilations = FixedCompilationDatabase::loadFromBuffer(".",(*File)->getBuffer(), ErrorMessage);
-      argc = DoubleDash - argv;
-    }
-    else
-    {
-      Compilations = FixedCompilationDatabase::loadFromCommandLine(argc, argv, ErrorMessage);
-    }
-  }
+  Compilations =
+      FixedCompilationDatabase::loadFromCommandLine(argc, argv, ErrorMessage);
   if (!ErrorMessage.empty())
     ErrorMessage.append("\n");
   llvm::raw_string_ostream OS(ErrorMessage);
@@ -131,20 +102,11 @@ llvm::Error OptionsParser::init(int &argc, const char **argv,
   }
 
   cl::PrintOptionValues();
-  SourcePathList = SourcePaths;
-  if (!SourcePaths.empty()) {
-    SmallString<1024> AbsolutePath(getAbsolutePath(SourcePaths[0]));
-    StringRef Directory = llvm::sys::path::parent_path(AbsolutePath);
-  }
+  SourcePath = BuildPath;
   if (!Compilations) {
     if (!BuildPath.empty()) {
       Compilations =
           CompilationDatabase::autoDetectFromDirectory(BuildPath, ErrorMessage);
-      if (SourcePaths.empty())
-        SourcePathList = Compilations->getAllFiles();
-    } else if (!SourcePaths.empty()) {
-      Compilations = CompilationDatabase::autoDetectFromSource(SourcePaths[0],
-                                                               ErrorMessage);
     }
     if (!Compilations) {
       llvm::errs() << "Error while trying to load a compilation database:\n"
@@ -153,28 +115,31 @@ llvm::Error OptionsParser::init(int &argc, const char **argv,
           new FixedCompilationDatabase(".", std::vector<std::string>()));
     }
   }
-  if (!Filter.empty()) {
-    std::vector<std::string> filters = Filter;
-    for (auto &filter : filters) {
-      llvm::SmallString<256> path(filter);
-      sys::path::remove_dots(path, true, sys::path::Style::windows);
-      filter = path.c_str();
-      replaceAll(filter, "\\", "/");
-    }
-    auto newEnd = std::remove_if(
-        SourcePathList.begin(), SourcePathList.end(), [&](std::string &path) {
+  SourcePathList = Compilations->getAllFiles();
+  if(!Filter.empty())
+  {
+      std::vector<std::string> filters = Filter;
+      for(auto& filter : filters)
+      {
+        llvm::SmallString<256> path(filter);
+        sys::path::remove_dots(path, true, sys::path::Style::windows);
+        filter = path.c_str();
+        replaceAll(filter, "\\", "/");
+      }
+      auto newEnd = std::remove_if(SourcePathList.begin(), SourcePathList.end(), 
+      [&](std::string& path)
+      {
           replaceAll(path, "\\", "/");
-          for (auto &filter : filters)
-            if (llvm::StringRef(path).startswith(filter))
+          for(auto& filter : filters)
+            if(llvm::StringRef(path).startswith(filter))
               return false;
           return true;
-        });
-    SourcePathList.erase(newEnd, SourcePathList.end());
+      });
+      SourcePathList.erase(newEnd, SourcePathList.end());
   }
-  if (SourcePathList.empty())
-    return llvm::Error::success();
   auto AdjustingCompilations =
-      std::make_unique<ArgumentsAdjustingCompilations>(std::move(Compilations));
+      std::make_unique<ArgumentsAdjustingCompilations>(
+          std::move(Compilations));
   Adjuster =
       getInsertArgumentAdjuster(ArgsBefore, ArgumentInsertPosition::BEGIN);
   Adjuster = combineAdjusters(
@@ -186,21 +151,18 @@ llvm::Error OptionsParser::init(int &argc, const char **argv,
 }
 
 llvm::Expected<OptionsParser> OptionsParser::create(
-    int &argc, const char **argv, llvm::cl::NumOccurrencesFlag OccurrencesFlag,
-    llvm::cl::OptionCategory &Category, const char *Overview) {
+    int &argc, const char **argv, llvm::cl::OptionCategory &Category, const char *Overview) {
   OptionsParser Parser;
   llvm::Error Err =
-      Parser.init(argc, argv, OccurrencesFlag, Category, Overview);
+      Parser.init(argc, argv, Category, Overview);
   if (Err)
     return std::move(Err);
   return std::move(Parser);
 }
 
-OptionsParser::OptionsParser(int &argc, const char **argv,
-                             llvm::cl::NumOccurrencesFlag OccurrencesFlag,
-                             cl::OptionCategory &Category,
-                             const char *Overview) {
-  llvm::Error Err = init(argc, argv, OccurrencesFlag, Category, Overview);
+OptionsParser::OptionsParser(
+    int &argc, const char **argv, cl::OptionCategory &Category, const char *Overview) {
+  llvm::Error Err = init(argc, argv, Category, Overview);
   if (Err) {
     llvm::report_fatal_error(
         Twine("CommonOptionsParser: failed to parse command-line arguments. ") +
